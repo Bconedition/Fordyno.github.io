@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ESP32 IMU Viewer</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#14171c;--mute:#6a7280;--line:#e1e4ea;--c1:#e5484d;--c2:#30a46c;--c3:#3e63dd;--btn:#14171c;--btnt:#fff;
+box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1115;--card:#181b21;--text:#eceef2;--mute:#8b93a1;--line:#2a2f38;--c1:#ff6369;--c2:#3dd68c;--c3:#7c9bff;--btn:#eceef2;--btnt:#0f1115}}
+:root[data-theme="dark"]{--bg:#0f1115;--card:#181b21;--text:#eceef2;--mute:#8b93a1;--line:#2a2f38;--c1:#ff6369;--c2:#3dd68c;--c3:#7c9bff;--btn:#eceef2;--btnt:#0f1115}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}
+main{max-width:720px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:4px 0 12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:12px}
+button{background:var(--btn);color:var(--btnt);border:0;border-radius:10px;padding:12px 18px;font-size:16px;font-weight:600;width:100%}
+#status{color:var(--mute);font-size:14px;margin-top:10px;min-height:20px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.val{text-align:center}
+.val b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.val span{font-size:12px;color:var(--mute)}
+h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:600}
+canvas{width:100%;height:150px;display:block}
+.legend{font-size:12px;color:var(--mute);margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin:0 4px 0 10px}
+.legend i:first-child{margin-left:0}
+</style>
+</head>
+<body>
+<main>
+<h1>ESP32 IMU Viewer</h1>
+<div class="card">
+<button id="btn">Connect to ESP32-IMU</button>
+<div id="status">Not connected</div>
+</div>
+<div class="card">
+<h2>Acceleration (g)</h2>
+<div class="grid">
+<div class="val"><b id="ax" style="color:var(--c1)">0.00</b><span>X</span></div>
+<div class="val"><b id="ay" style="color:var(--c2)">0.00</b><span>Y</span></div>
+<div class="val"><b id="az" style="color:var(--c3)">0.00</b><span>Z</span></div>
+</div>
+<canvas id="c1"></canvas>
+</div>
+<div class="card">
+<h2>Orientation (degrees)</h2>
+<div class="grid">
+<div class="val"><b id="roll" style="color:var(--c1)">0.0</b><span>Roll</span></div>
+<div class="val"><b id="pitch" style="color:var(--c2)">0.0</b><span>Pitch</span></div>
+<div class="val"><b id="yaw" style="color:var(--c3)">0.0</b><span>Yaw (drifts)</span></div>
+</div>
+<canvas id="c2"></canvas>
+</div>
+<div class="legend">On iPhone, open this page in the Bluefy browser. Safari has no Bluetooth support.</div>
+</main>
+<script>
+const SERVICE='19b10000-e8f2-537e-4f6c-d104768a1214';
+const CHAR='19b10001-e8f2-537e-4f6c-d104768a1214';
+const N=300;
+const A=[[],[],[]], O=[[],[],[]];
+const $=id=>document.getElementById(id);
+const btn=$('btn'), statusEl=$('status');
+let device=null, dirty=false;
+
+function setStatus(t){statusEl.textContent=t}
+
+function onData(e){
+  const d=e.target.value;
+  if(d.byteLength<12) return;
+  const v=[];
+  for(let i=0;i<6;i++) v.push(d.getInt16(i*2,true));
+  const a=[v[0]/1000,v[1]/1000,v[2]/1000];
+  const o=[v[3]/100,v[4]/100,v[5]/100];
+  for(let i=0;i<3;i++){
+    A[i].push(a[i]); if(A[i].length>N)A[i].shift();
+    O[i].push(o[i]); if(O[i].length>N)O[i].shift();
+  }
+  $('ax').textContent=a[0].toFixed(2);
+  $('ay').textContent=a[1].toFixed(2);
+  $('az').textContent=a[2].toFixed(2);
+  $('roll').textContent=o[0].toFixed(1);
+  $('pitch').textContent=o[1].toFixed(1);
+  $('yaw').textContent=o[2].toFixed(1);
+  dirty=true;
+}
+
+async function connect(){
+  if(!navigator.bluetooth){
+    setStatus('Web Bluetooth is not available here. Open this page in Bluefy (iPhone) or Chrome (Android).');
+    return;
+  }
+  try{
+    setStatus('Choose your device...');
+    device=await navigator.bluetooth.requestDevice({
+      acceptAllDevices:true,
+      optionalServices:[SERVICE]
+    });
+    device.addEventListener('gattserverdisconnected',()=>{
+      setStatus('Disconnected');btn.textContent='Connect to ESP32-IMU';
+    });
+    setStatus('Picked '+(device.name||'device')+', connecting...');
+    const t=(p,label)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej(new Error('Timed out at: '+label)),15000))]);
+    const server=await t(device.gatt.connect(),'GATT connect');
+    setStatus('Connected, finding service...');
+    const svc=await t(server.getPrimaryService(SERVICE),'find service');
+    const ch=await t(svc.getCharacteristic(CHAR),'find characteristic');
+    ch.addEventListener('characteristicvaluechanged',onData);
+    await t(ch.startNotifications(),'start notifications');
+    setStatus('Connected to '+device.name);
+    btn.textContent='Disconnect';
+  }catch(err){
+    setStatus('Error: '+err.message);
+  }
+}
+
+btn.onclick=()=>{
+  if(device&&device.gatt.connected){device.gatt.disconnect();}
+  else connect();
+};
+
+function css(n){return getComputedStyle(document.documentElement).getPropertyValue(n).trim()}
+
+function draw(cv,series,range,cols){
+  const dpr=window.devicePixelRatio||1;
+  const w=cv.clientWidth,h=cv.clientHeight;
+  if(cv.width!==w*dpr||cv.height!==h*dpr){cv.width=w*dpr;cv.height=h*dpr}
+  const g=cv.getContext('2d');
+  g.setTransform(dpr,0,0,dpr,0,0);
+  g.clearRect(0,0,w,h);
+  g.strokeStyle=css('--line');g.lineWidth=1;
+  g.beginPath();g.moveTo(0,h/2);g.lineTo(w,h/2);g.stroke();
+  series.forEach((s,i)=>{
+    g.strokeStyle=css(cols[i]);g.lineWidth=2;g.beginPath();
+    s.forEach((val,k)=>{
+      const x=k/(N-1)*w;
+      const y=h/2-(val/range)*(h/2-4);
+      k?g.lineTo(x,y):g.moveTo(x,y);
+    });
+    g.stroke();
+  });
+  g.fillStyle=css('--mute');g.font='11px sans-serif';
+  g.fillText('+'+range,4,12);g.fillText('-'+range,4,h-4);
+}
+
+function loop(){
+  if(dirty){
+    dirty=false;
+    draw($('c1'),A,2,['--c1','--c2','--c3']);
+    draw($('c2'),O,180,['--c1','--c2','--c3']);
+  }
+  requestAnimationFrame(loop);
+}
+draw($('c1'),A,2,['--c1','--c2','--c3']);
+draw($('c2'),O,180,['--c1','--c2','--c3']);
+loop();
+</script>
+</body>
+</html>
